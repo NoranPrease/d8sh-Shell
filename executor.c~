@@ -1,0 +1,272 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <err.h>
+#include <sysexits.h>
+#include "command.h"
+#include "executor.h"
+
+
+static void print_tree(struct tree *t);
+
+int execute(struct tree *t){
+  int fd, fd2, pipe_fd[2];
+  pid_t child_pid_one, child_pid_two;
+  /*char buffer[BUFSIZ];*/
+
+  /**********************PRINTS TREE********************************/
+  /*printf("\n**********Printing Tree**********\n");
+  print_tree(t);
+  printf("**************DONE***************\n");
+  printf("\n\n\n");*/
+    
+
+
+
+  /*Recursively go through nodes of tree, executing commands*/
+  if(t != NULL){
+
+    /*** NONE conjunctions ***/
+    if(t->conjunction == NONE){
+
+      /*Exiting*/
+      if(strcmp(t->argv[0], "exit") == 0){
+	exit(0);
+      }
+      
+      if(strcmp(t->argv[0], "false") == 0){
+	return -1;
+      }
+
+      /*Changing Directories*/
+      if(strcmp(t->argv[0], "cd") == 0){
+	char *loc;
+	if(t->argv[1] == NULL){
+	  loc = getenv("HOME");
+	} else{
+	  loc = t->argv[1];
+	}
+	
+	/*Makes sure it can change directory*/
+	if(chdir(loc)){
+	  printf("Could not change directory!\n");
+	} else{
+	  chdir(loc);
+	}
+
+	/*if not cd or exit, fork and exec*/
+      } else {
+	/*fork()*/
+	if ((child_pid_one = fork()) < 0){
+	  perror("fork");
+	}
+	if (child_pid_one){   /*parent code*/
+	  int status;
+	  wait(&status);
+	} else {   /*child code*/
+
+	  /*determining IR/OR*/
+	  if(t->input != NULL){
+	    /*open()*/
+	    if ((fd = open(t->input, O_RDONLY)) < 0){
+	      perror("open");
+	    }
+	    /*dup2()*/
+	    if (dup2(fd, STDIN_FILENO) < 0){
+	      perror("dup2");
+	    }
+	    close(fd); /* Releasing resource */
+	  }
+
+	if(t->output != NULL){
+	  /*open()*/
+	  if ((fd2 = open(t->output, O_WRONLY | O_TRUNC | O_CREAT, 0664)) < 0){
+	    perror("open");
+	  }
+
+	  if ((dup2(fd2, STDOUT_FILENO)) < 0){
+	    perror("dup2");
+	  }
+	  close(fd2);
+	}
+	  /*exec program*/
+	  if(execvp(t->argv[0], t->argv) < 0){
+	    printf("Failed to execute %s\n", t->argv[0]); 
+	    exit(0);
+	  }
+	}
+      }   
+    }
+
+    /*** AND conjunction ***/
+    else if(t->conjunction == AND){
+
+      /*determine IR/OR*/
+      if(t->input != NULL){
+	/*open()*/
+	if ((fd = open(t->input, O_RDONLY)) < 0){
+	  perror("open");
+	}
+	/*dup2()*/
+	if (dup2(fd, STDIN_FILENO) < 0){
+	  perror("dup2");
+	}
+	/*	close(fd);*/ /* Releasing recource */
+      }
+
+      /*if t->output defined, it is FD output for children*/
+      if(t->output != NULL){
+	/*open()*/
+	if ((fd2 = open(t->output, O_WRONLY | O_TRUNC | O_CREAT, 0664)) < 0){
+	  perror("open");
+	}
+	/*dup2()*/
+	if (dup2(fd2, STDOUT_FILENO) < 0){
+	  perror("dup2");
+	}
+	/*close(fd2);*/
+      }
+
+      
+      /*If left child returns false, don't do right child*/
+      if(execute(t->left) != -1){
+	if(execute(t->right) == -1){
+	  return -1;
+	}
+      }
+
+      close(fd2);
+      close(fd);
+
+    }
+
+    /*** PIPE conjunction ***/
+    else if(t->conjunction == PIPE){
+      
+      /*pipe()*/
+      if(pipe(pipe_fd) < 0){
+	perror("pipe");
+      }
+
+      /*fork()*/
+      if((child_pid_one = fork()) < 0){
+	perror("fork");
+      }
+
+      if(child_pid_one == 0){   /*child #1's code (LEFT TREE)*/
+	close(pipe_fd[0]); /*Don't need pipe's read end*/
+
+	/*defining IR/OR*/
+	if(t->left->input != NULL){
+	  /*open()*/
+	  if ((fd = open(t->left->input, O_RDONLY)) < 0){
+	    perror("open");
+	  }
+	  /*dup2()*/
+	  if (dup2(fd, STDIN_FILENO) < 0){
+	    perror("dup2");
+	  }
+	  close(fd); /* Releasing recource */
+	}
+
+	if(t->output != NULL){
+	  /*open()*/
+	  if ((fd2 = open(t->left->output, O_WRONLY | O_TRUNC | O_CREAT, 0664)) < 0){
+	    perror("open");
+	  }
+	  /*dup2()*/
+	  if ((dup2(fd2, STDOUT_FILENO)) < 0){
+	    perror("dup2");
+	  }
+	  close(fd2);
+	}
+	
+	/*Redirecting STDOUT to pipe write*/
+	if(dup2(pipe_fd[1], STDOUT_FILENO) < 0){ /************************************************************/
+	  perror("dup2");
+	}
+	close(pipe_fd[1]);
+
+	execvp(t->left->argv[0], t->left->argv);
+
+      } else {   /* parent code */
+	/*fork()*/
+	if((child_pid_two = fork()) < 0){
+	  perror("fork");
+	}
+	
+	if(child_pid_two == 0){   /*child #2's code (RIGHT TREE)*/
+	  close(pipe_fd[1]);   /*Don't need pipe's write*/
+
+	  /*defining IR/OR*/
+	  if(t->left->input != NULL){
+	    /*open()*/
+	    if ((fd = open(t->left->input, O_RDONLY)) < 0){
+	      perror("open");
+	    }
+	    /*dup2()*/
+	    if (dup2(fd, STDIN_FILENO) < 0){
+	      perror("dup2");
+	    }
+	    close(fd); /* Releasing recource */
+	  }
+	  
+	  if(t->output != NULL){
+	    /*open()*/
+	    if ((fd2 = open(t->left->output, O_WRONLY | O_TRUNC | O_CREAT, 0664)) < 0){
+	      perror("open");
+	    }
+	    /*dup2()*/
+	    if ((dup2(fd2, STDOUT_FILENO)) < 0){
+	      perror("dup2");
+	    }
+	    close(fd2);
+	  }	  
+	  
+	  /*Redirecting STDIN to pipe read*/
+	  if(dup2(pipe_fd[0], STDIN_FILENO) < 0){
+	    perror("dup2");
+	  }
+	  
+	  close(pipe_fd[0]);
+	  
+	  execvp(t->right->argv[0], t->right->argv);
+
+	} else {
+	  close(pipe_fd[0]);
+	  close(pipe_fd[1]);
+
+	  wait(NULL);
+	  wait(NULL);
+	}
+      }
+    }
+  }
+  return 0;
+}
+
+
+
+
+
+static void print_tree(struct tree *t){
+  if(t != NULL){
+    print_tree(t->left);
+
+    if(t->conjunction == NONE){
+      printf("NONE: %s, ", t->argv[0]);
+    } else{
+      printf("%s, ", conj[t->conjunction]);
+    }
+    
+    printf("IR: %s, ", t->input);
+    printf("OR: %s\n", t->output);
+
+    print_tree(t->right);
+  }
+}
